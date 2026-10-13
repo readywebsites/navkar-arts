@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Lenis from 'lenis';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
@@ -80,15 +80,29 @@ export default function App() {
     };
   }, []);
 
+  // Stable callbacks to eliminate re-render cascades and effect churn
+  const handleFadeStart = useCallback(() => {
+    setIsWebsiteRevealed(true);
+  }, []);
+
+  const handleLoaderComplete = useCallback(() => {
+    setIsLoaderFinished(true);
+  }, []);
+
+  const handleVideoReady = useCallback(() => {
+    setIsVideoReady(true);
+  }, []);
+
   // When loader completes, resume scrolling and recalculate layout
   useEffect(() => {
     if (isWebsiteRevealed) {
       if (lenisRef.current) {
         lenisRef.current.start();
       }
-      setTimeout(() => {
+      const t = setTimeout(() => {
         ScrollTrigger.refresh();
       }, 150);
+      return () => clearTimeout(t);
     }
   }, [isWebsiteRevealed]);
 
@@ -98,8 +112,8 @@ export default function App() {
       {!isLoaderFinished && (
         <CinematicLoader
           isVideoReady={isVideoReady}
-          onFadeStart={() => setIsWebsiteRevealed(true)}
-          onComplete={() => setIsLoaderFinished(true)}
+          onFadeStart={handleFadeStart}
+          onComplete={handleLoaderComplete}
         />
       )}
 
@@ -107,7 +121,7 @@ export default function App() {
       <GlobalVideoBackground
         isPlayingAmbient={isPlayingAmbient}
         setIsPlayingAmbient={setIsPlayingAmbient}
-        onVideoReady={() => setIsVideoReady(true)}
+        onVideoReady={handleVideoReady}
       />
 
       {/* 

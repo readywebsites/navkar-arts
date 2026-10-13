@@ -1,8 +1,4 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import gsap from 'gsap';
-import { ScrollTrigger } from 'gsap/ScrollTrigger';
-
-gsap.registerPlugin(ScrollTrigger);
 
 const TARGET_DURATION = 100.0; // 01:40 (1 minute 40 seconds)
 
@@ -10,7 +6,9 @@ function detectMobileViewport() {
   if (typeof window === 'undefined') return false;
   return (
     window.innerWidth <= 900 ||
-    (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
+    (window.matchMedia &&
+      (window.matchMedia('(pointer: coarse)').matches ||
+        window.matchMedia('(hover: none)').matches)) ||
     /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '')
   );
 }
@@ -21,71 +19,66 @@ export default function GlobalVideoBackground({ isPlayingAmbient, onVideoReady }
   const smoothedTimeRef = useRef(0);
   const isSeekingRef = useRef(false);
   const seekStartTimeRef = useRef(0);
-  const pendingTimeRef = useRef(null);
+  const lastSeekDispatchRef = useRef(0);
   const rafIdRef = useRef(null);
   const decoderPrimedRef = useRef(false);
-  const stableViewportHeightRef = useRef(
-    typeof window !== 'undefined' ? document.documentElement.clientHeight || window.innerHeight : 800
-  );
-  const lastViewportWidthRef = useRef(typeof window !== 'undefined' ? window.innerWidth : 390);
+  const maxScrollRef = useRef(1);
+  const hasFirstFrameRef = useRef(false);
+  const onVideoReadyRef = useRef(onVideoReady);
 
   const [isMobileSource] = useState(() => detectMobileViewport());
   const [hasFirstFrame, setHasFirstFrame] = useState(false);
   const [videoError, setVideoError] = useState(false);
 
-  // Frame-accurate seek dispatcher with lock-free latest-timestamp queue & anti-freeze watchdog
-  const performSeek = useCallback((time) => {
-    const video = videoRef.current;
-    if (!video || video.readyState < 1) return;
+  useEffect(() => {
+    onVideoReadyRef.current = onVideoReady;
+  }, [onVideoReady]);
 
-    const rawDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : TARGET_DURATION;
-    const effectiveDuration = Math.min(rawDuration, TARGET_DURATION);
-    const clamped = Math.max(0, Math.min(effectiveDuration, time));
-    const now = performance.now();
-
-    // Release seek lock if browser finished seeking natively or if a seek event was coalesced (>120ms watchdog)
-    if (isSeekingRef.current && (!video.seeking || now - seekStartTimeRef.current > 120)) {
-      isSeekingRef.current = false;
-    }
-
-    // If hardware decoder is actively seeking, store only the latest requested timestamp (no backlog queue)
-    if (isSeekingRef.current) {
-      pendingTimeRef.current = clamped;
-      return;
-    }
-
-    // Minimum step threshold: 0.025s (~1 frame) to prevent redundant decoder commands
-    if (Math.abs(video.currentTime - clamped) >= 0.025) {
-      try {
-        isSeekingRef.current = true;
-        seekStartTimeRef.current = now;
-        video.currentTime = clamped;
-      } catch {
-        isSeekingRef.current = false;
-      }
-    }
+  // Pre-calculate and cache document scroll ceiling without layout thrashing during scroll
+  const updateMetrics = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    const docHeight = Math.max(
+      document.body.scrollHeight,
+      document.documentElement.scrollHeight,
+      document.body.offsetHeight,
+      document.documentElement.offsetHeight
+    );
+    const winHeight = window.innerHeight || document.documentElement.clientHeight || 1;
+    maxScrollRef.current = Math.max(1, docHeight - winHeight);
   }, []);
 
-  // On-demand requestAnimationFrame scheduler: runs at 60fps during scroll/momentum and idles at 0% CPU when settled
-  const startScrubLoop = useCallback(() => {
+  // Single RAF seek loop: runs only during movement and idles at 0% CPU once settled
+  const startRafLoop = useCallback(() => {
     if (rafIdRef.current !== null) return;
 
-    const isTouch =
-      typeof window !== 'undefined' &&
-      window.matchMedia &&
-      window.matchMedia('(pointer: coarse)').matches;
+    const isTouch = detectMobileViewport();
     const prefersReducedMotion =
       typeof window !== 'undefined' &&
       window.matchMedia &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-    // On touch devices, native touch scrolling already provides momentum, so use a faster 0.42 tracking factor
-    const lerpFactor = prefersReducedMotion ? 1.0 : isTouch ? 0.42 : 0.24;
+    // Minimum seek time interval and delta threshold based on device profile
+    const minSeekInterval = isTouch ? 42 : 24; // ms (24fps on mobile, ~40fps on desktop)
+    const minSeekDelta = isTouch ? 0.04 : 0.025; // seconds
+    const lerpFactor = prefersReducedMotion ? 1.0 : isTouch ? 0.45 : 0.28;
 
     const tick = () => {
       if (isPlayingAmbient) {
         rafIdRef.current = null;
         return;
+      }
+
+      const video = videoRef.current;
+      if (!video) {
+        rafIdRef.current = null;
+        return;
+      }
+
+      const now = performance.now();
+
+      // Anti-freeze watchdog: if browser decoder has been seeking > 150ms, force release
+      if (isSeekingRef.current && (!video.seeking || now - seekStartTimeRef.current > 150)) {
+        isSeekingRef.current = false;
       }
 
       const target = targetTimeRef.current;
@@ -98,14 +91,40 @@ export default function GlobalVideoBackground({ isPlayingAmbient, onVideoReady }
         smoothedTimeRef.current = current + diff * lerpFactor;
       }
 
-      performSeek(smoothedTimeRef.current);
-
-      // Keep RAF alive while interpolating or while a pending seek is waiting for decoder release
+      // Check if decoder is ready to receive a new timestamp
       if (
-        Math.abs(targetTimeRef.current - smoothedTimeRef.current) > 0.008 ||
-        isSeekingRef.current ||
-        pendingTimeRef.current !== null
+        !isSeekingRef.current &&
+        video.readyState >= 1 &&
+        now - lastSeekDispatchRef.current >= minSeekInterval
       ) {
+        const rawDuration =
+          Number.isFinite(video.duration) && video.duration > 0
+            ? video.duration
+            : TARGET_DURATION;
+        const effectiveDuration = Math.min(rawDuration, TARGET_DURATION);
+        const clamped = Math.max(0, Math.min(effectiveDuration, smoothedTimeRef.current));
+
+        if (Math.abs(video.currentTime - clamped) >= minSeekDelta) {
+          try {
+            isSeekingRef.current = true;
+            seekStartTimeRef.current = now;
+            lastSeekDispatchRef.current = now;
+
+            // Use fastSeek if supported by modern browser, otherwise standard currentTime
+            if (typeof video.fastSeek === 'function') {
+              video.fastSeek(clamped);
+            } else {
+              video.currentTime = clamped;
+            }
+          } catch {
+            isSeekingRef.current = false;
+          }
+        }
+      }
+
+      // Keep RAF loop running until smoothedTime reaches targetTime AND decoder is free
+      const remainingDelta = Math.abs(targetTimeRef.current - smoothedTimeRef.current);
+      if (remainingDelta > 0.008 || isSeekingRef.current) {
         rafIdRef.current = requestAnimationFrame(tick);
       } else {
         rafIdRef.current = null;
@@ -113,9 +132,9 @@ export default function GlobalVideoBackground({ isPlayingAmbient, onVideoReady }
     };
 
     rafIdRef.current = requestAnimationFrame(tick);
-  }, [isPlayingAmbient, performSeek]);
+  }, [isPlayingAmbient]);
 
-  // Wake up mobile hardware decoder (iOS Safari / Android Chrome) so scrubbed frames render immediately
+  // Wake up hardware decoder on iOS/Safari/Android so scrubbed frames render immediately
   const primeVideoDecoder = useCallback(() => {
     const video = videoRef.current;
     if (!video || decoderPrimedRef.current || isPlayingAmbient) return;
@@ -127,68 +146,125 @@ export default function GlobalVideoBackground({ isPlayingAmbient, onVideoReady }
         .then(() => {
           if (!isPlayingAmbient) {
             video.pause();
-            performSeek(targetTimeRef.current);
+            startRafLoop();
           }
         })
         .catch(() => {
-          // Safe to ignore on muted background video
+          // Safe to ignore on muted autoplay restrictions
         });
     }
-  }, [isPlayingAmbient, performSeek]);
+  }, [isPlayingAmbient, startRafLoop]);
 
   const markVideoReady = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
+
     if (!isPlayingAmbient) {
       video.pause();
     }
-    setHasFirstFrame(true);
-    if (onVideoReady) {
-      onVideoReady(true);
+
+    if (!hasFirstFrameRef.current) {
+      hasFirstFrameRef.current = true;
+      setHasFirstFrame(true);
     }
-  }, [isPlayingAmbient, onVideoReady]);
 
-  // Immediate check on mount for cached video + first user interaction decoder wakeup
-  useEffect(() => {
+    if (onVideoReadyRef.current) {
+      onVideoReadyRef.current(true);
+    }
+  }, [isPlayingAmbient]);
+
+  // Synchronize target time with scroll position (Zero reflow during hot scroll events)
+  const handleScroll = useCallback(() => {
+    if (isPlayingAmbient) return;
+
+    const scrollY = Math.max(
+      0,
+      window.scrollY || window.pageYOffset || document.documentElement.scrollTop || 0
+    );
+
+    const progress = Math.min(1, Math.max(0, scrollY / maxScrollRef.current));
     const video = videoRef.current;
-    if (!video) return;
+    const rawDuration =
+      video && Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration
+        : TARGET_DURATION;
+    const effectiveDuration = Math.min(rawDuration, TARGET_DURATION);
 
-    if (video.readyState >= 1) {
+    targetTimeRef.current = progress * effectiveDuration;
+    startRafLoop();
+  }, [isPlayingAmbient, startRafLoop]);
+
+  // Mount setup: attach passive scroll listener, resize listener, and gestures
+  useEffect(() => {
+    updateMetrics();
+
+    const video = videoRef.current;
+    if (video && video.readyState >= 1) {
       markVideoReady();
     }
 
     const onUserGesture = () => {
       primeVideoDecoder();
-      startScrubLoop();
+      handleScroll();
     };
+
+    // Passive, zero-blocking listeners
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    window.addEventListener('resize', () => {
+      updateMetrics();
+      handleScroll();
+    }, { passive: true });
+    window.addEventListener('orientationchange', () => {
+      setTimeout(() => {
+        updateMetrics();
+        handleScroll();
+      }, 100);
+    }, { passive: true });
 
     window.addEventListener('touchstart', onUserGesture, { passive: true, once: true });
     window.addEventListener('pointerdown', onUserGesture, { passive: true, once: true });
     window.addEventListener('wheel', onUserGesture, { passive: true, once: true });
 
+    let resizeObserver = null;
+    if (typeof ResizeObserver !== 'undefined' && document.body) {
+      resizeObserver = new ResizeObserver(() => {
+        updateMetrics();
+      });
+      resizeObserver.observe(document.body);
+    }
+
+    // Initial positioning
+    handleScroll();
+
     return () => {
+      window.removeEventListener('scroll', handleScroll);
       window.removeEventListener('touchstart', onUserGesture);
       window.removeEventListener('pointerdown', onUserGesture);
       window.removeEventListener('wheel', onUserGesture);
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
         rafIdRef.current = null;
       }
     };
-  }, [markVideoReady, primeVideoDecoder, startScrubLoop]);
+  }, [handleScroll, markVideoReady, primeVideoDecoder, updateMetrics]);
 
-  // Listen to native media seeked/seeking events to drain latest pending timestamp without backlog
+  // Native media seek lifecycle listeners
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
     const onSeeked = () => {
       isSeekingRef.current = false;
-      setHasFirstFrame(true);
-      if (pendingTimeRef.current !== null) {
-        const latestRequested = pendingTimeRef.current;
-        pendingTimeRef.current = null;
-        performSeek(latestRequested);
+      if (!hasFirstFrameRef.current) {
+        hasFirstFrameRef.current = true;
+        setHasFirstFrame(true);
+      }
+      // Resume RAF loop if target hasn't been reached yet
+      if (Math.abs(targetTimeRef.current - (video.currentTime || 0)) > 0.015) {
+        startRafLoop();
       }
     };
 
@@ -204,87 +280,9 @@ export default function GlobalVideoBackground({ isPlayingAmbient, onVideoReady }
       video.removeEventListener('seeked', onSeeked);
       video.removeEventListener('seeking', onSeeking);
     };
-  }, [performSeek]);
+  }, [startRafLoop]);
 
-  // Unified Scroll Progress Synchronization across entire landing page (Hero -> StudioFooter)
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    if (!isPlayingAmbient) {
-      video.pause();
-    }
-
-    const updateScrollProgress = () => {
-      if (isPlayingAmbient) return;
-
-      const scrollY = Math.max(
-        0,
-        window.scrollY || window.pageYOffset || document.documentElement.scrollTop || 0
-      );
-
-      // Stabilize viewport height against mobile browser address-bar expand/collapse (<130px delta on same width)
-      const currentW = window.innerWidth;
-      const currentH = document.documentElement.clientHeight || window.innerHeight || 1;
-      if (
-        Math.abs(currentW - lastViewportWidthRef.current) > 20 ||
-        Math.abs(currentH - stableViewportHeightRef.current) > 140
-      ) {
-        stableViewportHeightRef.current = currentH;
-        lastViewportWidthRef.current = currentW;
-      }
-
-      const docHeight = Math.max(
-        document.body.scrollHeight,
-        document.documentElement.scrollHeight,
-        document.body.offsetHeight,
-        document.documentElement.offsetHeight
-      );
-
-      const maxScroll = Math.max(docHeight - stableViewportHeightRef.current, 1);
-      const progress = Math.max(0, Math.min(1, scrollY / maxScroll));
-
-      const rawDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : TARGET_DURATION;
-      const effectiveDuration = Math.min(rawDuration, TARGET_DURATION);
-
-      targetTimeRef.current = progress * effectiveDuration;
-      startScrubLoop();
-    };
-
-    const trigger = ScrollTrigger.create({
-      start: 0,
-      end: 'max',
-      onUpdate: updateScrollProgress,
-    });
-
-    window.addEventListener('scroll', updateScrollProgress, { passive: true });
-    window.addEventListener('touchmove', updateScrollProgress, { passive: true });
-    window.addEventListener('resize', updateScrollProgress, { passive: true });
-    window.addEventListener('orientationchange', updateScrollProgress, { passive: true });
-
-    let resizeObserver = null;
-    if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(() => {
-        updateScrollProgress();
-      });
-      resizeObserver.observe(document.body);
-    }
-
-    updateScrollProgress();
-
-    return () => {
-      trigger.kill();
-      window.removeEventListener('scroll', updateScrollProgress);
-      window.removeEventListener('touchmove', updateScrollProgress);
-      window.removeEventListener('resize', updateScrollProgress);
-      window.removeEventListener('orientationchange', updateScrollProgress);
-      if (resizeObserver) {
-        resizeObserver.disconnect();
-      }
-    };
-  }, [isPlayingAmbient, startScrubLoop]);
-
-  // Ambient continuous playback mode
+  // Ambient mode toggle
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -294,17 +292,17 @@ export default function GlobalVideoBackground({ isPlayingAmbient, onVideoReady }
       video.play().catch((err) => console.warn('Ambient play restricted:', err));
     } else {
       video.pause();
-      startScrubLoop();
+      startRafLoop();
     }
-  }, [isPlayingAmbient, startScrubLoop]);
+  }, [isPlayingAmbient, startRafLoop]);
 
   return (
     <div
       id="global-video-backdrop"
-      className="fixed top-0 left-0 right-0 w-full h-[100lvh] min-h-screen z-0 pointer-events-none overflow-hidden select-none bg-[#0B0B0B]"
+      className="fixed top-0 left-0 right-0 w-full h-[100dvh] min-h-screen z-0 pointer-events-none overflow-hidden select-none bg-[#0B0B0B]"
       aria-hidden="true"
     >
-      {/* Static High-Resolution Architectural Poster Underneath (Eliminates Black Flashes & Acts as Fallback) */}
+      {/* High-Resolution Architectural Poster Underneath (Zero Black Flashes Fallback) */}
       <img
         src="/hero-poster.jpg"
         alt=""
@@ -312,9 +310,9 @@ export default function GlobalVideoBackground({ isPlayingAmbient, onVideoReady }
       />
 
       {/* 
-        Adaptive Mobile / Desktop Hardware-Accelerated Scrubbing Video (01:40 / 100.0s)
-        - Mobile & Touch Devices: /villa-mobile.mp4 (720p, 24fps, 0 B-frames, -tune fastdecode, 0.25s GOP)
-        - Desktop Devices: /villa-scrub.mp4 (1080p, 30fps, 0.2s GOP)
+        Hardware-Accelerated Frame-Accurate Scrubbing Video (01:40 / 100.0s)
+        - Desktop: /villa-scrub.mp4 (1080p, 30fps, 500 keyframes, 0 B-frames, fastdecode, 54 MB)
+        - Mobile & Touch: /villa-mobile.mp4 (720p, 24fps, 400 keyframes, 0 B-frames, fastdecode, 26 MB)
       */}
       {!videoError && (
         <video
@@ -326,15 +324,16 @@ export default function GlobalVideoBackground({ isPlayingAmbient, onVideoReady }
           disablePictureInPicture
           disableRemotePlayback
           onLoadedMetadata={() => {
+            updateMetrics();
             markVideoReady();
             primeVideoDecoder();
-            startScrubLoop();
+            handleScroll();
           }}
           onLoadedData={markVideoReady}
           onCanPlay={markVideoReady}
           onError={() => {
             setVideoError(true);
-            if (onVideoReady) onVideoReady(true);
+            if (onVideoReadyRef.current) onVideoReadyRef.current(true);
           }}
           className={`absolute inset-0 w-full h-full object-cover object-center transform-gpu will-change-transform select-none pointer-events-none transition-opacity duration-300 ${
             hasFirstFrame ? 'opacity-100' : 'opacity-0'
@@ -354,7 +353,7 @@ export default function GlobalVideoBackground({ isPlayingAmbient, onVideoReady }
         </video>
       )}
 
-      {/* Gentle Optical Scrim: Sharp Interior Visibility with Balanced Contrast for Typography */}
+      {/* Subtle Optical Scrim for High Typography Contrast */}
       <div className="absolute inset-0 bg-black/20 pointer-events-none" />
       <div className="absolute inset-0 bg-gradient-to-b from-black/35 via-transparent to-black/40 pointer-events-none" />
     </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 const STATUS_MESSAGES = [
   { at: 0, text: 'Initializing Architectural Canvas...' },
@@ -13,11 +13,26 @@ export default function CinematicLoader({ isVideoReady, onFadeStart, onComplete 
   const [isFadingOut, setIsFadingOut] = useState(false);
   const [statusText, setStatusText] = useState('Initializing Architectural Canvas...');
 
-  // Lock body scroll while loader is visible
+  const isVideoReadyRef = useRef(isVideoReady);
+  const onFadeStartRef = useRef(onFadeStart);
+  const onCompleteRef = useRef(onComplete);
+
+  useEffect(() => {
+    isVideoReadyRef.current = isVideoReady;
+  }, [isVideoReady]);
+
+  useEffect(() => {
+    onFadeStartRef.current = onFadeStart;
+    onCompleteRef.current = onComplete;
+  }, [onFadeStart, onComplete]);
+
+  // Lock body scroll strictly while loader is actively visible; release immediately on fade-out
   useEffect(() => {
     document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
     return () => {
       document.body.style.overflow = '';
+      document.documentElement.style.overflow = '';
     };
   }, []);
 
@@ -26,19 +41,37 @@ export default function CinematicLoader({ isVideoReady, onFadeStart, onComplete 
     let currentProgress = 0;
     let timer = null;
     let fallbackTimer = null;
+    let isTerminated = false;
+
+    const finishLoader = () => {
+      if (isTerminated) return;
+      isTerminated = true;
+      setIsFadingOut(true);
+      // Immediately restore native scrolling so user interaction is never blocked
+      document.body.style.overflow = '';
+      document.documentElement.style.overflow = '';
+      if (onFadeStartRef.current) {
+        onFadeStartRef.current();
+      }
+      setTimeout(() => {
+        if (onCompleteRef.current) {
+          onCompleteRef.current();
+        }
+      }, 800);
+    };
 
     const step = () => {
-      // If video is ready, accelerate smoothly towards 100
-      const increment = isVideoReady 
+      if (isTerminated) return;
+      const ready = isVideoReadyRef.current;
+      const increment = ready 
         ? Math.random() * 3.5 + 2.0 
         : currentProgress < 85 
           ? Math.random() * 1.8 + 0.8 
-          : 0.25; // Gentle slowdown near 85% waiting for video
+          : 0.25;
 
       currentProgress = Math.min(100, currentProgress + increment);
       setProgress(Math.round(currentProgress));
 
-      // Update architectural micro-status
       for (let i = STATUS_MESSAGES.length - 1; i >= 0; i--) {
         if (currentProgress >= STATUS_MESSAGES[i].at) {
           setStatusText(STATUS_MESSAGES[i].text);
@@ -49,31 +82,24 @@ export default function CinematicLoader({ isVideoReady, onFadeStart, onComplete 
       if (currentProgress < 100) {
         timer = setTimeout(step, 30);
       } else {
-        // Reached 100% -> Brief 300ms hold then initiate elegant crossfade
-        setTimeout(() => {
-          setIsFadingOut(true);
-          if (onFadeStart) onFadeStart();
-          setTimeout(() => {
-            if (onComplete) onComplete();
-          }, 850); // Allow fade-out transition to complete
-        }, 300);
+        setTimeout(finishLoader, 250);
       }
     };
 
     timer = setTimeout(step, 80);
 
-    // Safety timeout: If video or network takes more than 3.5s, force completion
     fallbackTimer = setTimeout(() => {
-      if (currentProgress < 95) {
+      if (!isTerminated && currentProgress < 95) {
         currentProgress = 95;
       }
-    }, 3500);
+    }, 3200);
 
     return () => {
+      isTerminated = true;
       clearTimeout(timer);
       clearTimeout(fallbackTimer);
     };
-  }, [isVideoReady, onFadeStart, onComplete]);
+  }, []);
 
   // Dynamic Real-Time Color Interpolation:
   // Starts at Champagne Gold: rgb(212, 176, 123) (#D4B07B)

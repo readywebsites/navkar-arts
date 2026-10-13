@@ -8,6 +8,7 @@
     color: #FAF6EE;
     font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
     overflow-x: clip;
+    overflow-y: auto;
     max-width: 100%;
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
@@ -20,7 +21,8 @@
     max-width: 100%;
     margin: 0;
     padding: 0;
-    overscroll-behavior-y: none;
+    touch-action: pan-y pinch-zoom;
+    -webkit-overflow-scrolling: touch;
   }
 
   /* Lenis Smooth Scroll Integration */
