@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    background-color: #0B0B0B;
+    color: #FAF6EE;
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+    overflow-x: clip;
+    max-width: 100%;
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    background-color: #0B0B0B;
+    color: #FAF6EE;
+    overflow-x: clip;
+    max-width: 100%;
+    margin: 0;
+    padding: 0;
+    overscroll-behavior-y: none;
+  }
+
+  /* Lenis Smooth Scroll Integration */
+  html.lenis,
+  html.lenis body {
+    height: auto;
+  }
+
+  .lenis.lenis-smooth {
+    scroll-behavior: auto !important;
+  }
+
+  .lenis.lenis-smooth [data-lenis-prevent] {
+    overscroll-behavior: contain;
+  }
+
+  .lenis.lenis-stopped {
+    overflow: hidden;
+  }
+
+  /* Custom luxury scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #121212;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #C39A58;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #D4B07B;
+  }
+}
+
+@layer utilities {
+  .text-gold-gradient {
+    background: linear-gradient(135deg, #FFF0DC 0%, #EADBC8 25%, #C39A58 70%, #9E7638 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .text-silver-gradient {
+    background: linear-gradient(135deg, #FFFFFF 0%, #E0E0E0 50%, #9E9E9E 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .border-luxury {
+    border-color: rgba(195, 154, 88, 0.25);
+  }
+
+  .border-luxury-subtle {
+    border-color: rgba(234, 219, 200, 0.12);
+  }
+
+  .bg-radial-luxury {
+    background: radial-gradient(circle at 50% 0%, rgba(195, 154, 88, 0.08) 0%, rgba(11, 11, 11, 0) 70%);
+  }
+
+  .bg-luxury-glass {
+    background: rgba(18, 18, 18, 0.75);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin-slow,
+  .animate-bounce,
+  .animate-pulse {
+    animation: none !important;
+  }
+}
+
